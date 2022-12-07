@@ -1,0 +1,279 @@
+---
+title: "PROJEK"
+author: "Gilang Pappa' Tanto Pambua"
+date: "2022-11-25"
+output: html_document
+---
+```{r}
+#library
+library(twitteR) #library untuk twitter
+library(vroom) #untuk membaca data
+library(tm) #untuk cleaning data
+library(tidyverse) #melakukan pengolahan data: import, export, visualisasi, dan pemodelan data.
+library(tm) #menggunakan corpus dalam cleaning data
+library(RTextTools) #proses pengkalisifikasian text secara otomatis dengan supervised learning
+library(naivebayes) #library naive bayes
+library(e1071)
+library(rlang)
+library(vctrs)#untuk menganalisis antarmuka fungsi
+library(dplyr) #library untuk manipulasi data frame
+library(caret) #library untuk pemisahan data, estimasi kepentingan variabel, dan resampling
+library(syuzhet) #library untuk membaca fungsi get_nrc
+library(shiny) #library untuk shiny
+library(wordcloud) #library wordcloud
+library(wordcloud2) #library wordcloud
+library(SnowballC) #library yang diperlukan untuk proses stemming (pemakaian kata dasar)
+```
+
+```{r}
+#api(application programing interface) & token dev twitter 
+api_key<- "cvE55mBpAA4ryBCO2QFvkkrA3" 
+api_secret<- "lyCrqoYeGj1zmkl25Nn9DBgNFjXpUzEbRksT3LpdxP0jnxsz8q"
+access_token<- "1462997508859187204-9AiHfSDm17ogce6xs3VlNkrSv9utHK"
+access_token_secret<- "CkuYYSOajxV7fbh7pTZYFHlrLEz8kWo5q3hkggcVZkws3"
+
+setup_twitter_oauth(api_key,api_secret,access_token,access_token_secret) #setup api&token
+
+#proses mencari data di twitter
+tw = searchTwitter('periode jokowi -filter:retweets',
+                   n=500,
+                   retryOnRateLimit = 500,
+                   lang="id")#mencari tweet periode jokowi
+saveRDS(tw, file ='tweet.rds')#save data ke format rds
+
+dataoriginal <- do.call("rbind", lapply(tw, as.data.frame)) #membuat crawling data twitter jadi data frame
+
+write.csv(dataoriginal,'Original.csv')#save data ke file csv
+```
+
+```{r}
+#proses cleaning data
+tw <- readRDS('tweet.rds')
+DataKotor = twListToDF(tw) #mengkonvert list twitteR ke data
+
+#proses menampilkan data yang telah di mining
+DataKotor2 <- DataKotor$text
+DataKotorCorpus <- Corpus(VectorSource(DataKotor2))
+
+#hapus URL pada tweet
+removeURL <- function(x) gsub("http[^[:space:]]*", "", x)
+twitclean <- tm_map(DataKotorCorpus, removeURL)
+
+#hapus baris baru
+removeNL <- function(y) gsub("\n", "", y)
+twitclean <- tm_map(twitclean, removeNL)
+
+#hapus koma
+replacecomma <- function(y) gsub(",", "", y)
+twitclean <- tm_map(twitclean, replacecomma)
+
+##hapus retweet
+removeRT <- function(y) gsub("RT ", "", y)
+twitclean <- tm_map(twitclean, removeRT)
+
+##hapus titik
+removetitik2 <- function(y) gsub(":", "", y)
+twitclean <- tm_map(twitclean, removetitik2)
+
+##hapus titik koma
+removetitikkoma <- function(y) gsub(";", " ", y)
+twitclean <- tm_map(twitclean, removetitikkoma)
+
+#hapus titik3
+removetitik3 <- function(y) gsub("p.", "", y)
+twitclean <- tm_map(twitclean, removetitik3)
+
+#hapus &amp
+removeamp <- function(y) gsub("&amp;", "", y)
+twitclean <- tm_map(twitclean, removeamp)
+
+#hapus Mention
+removeUN <- function(z) gsub("@\\w+", "", z)
+twitclean <- tm_map(twitclean, removeUN)
+
+#hapus space dll
+remove.all <- function(xy) gsub("[^[:alpha:][:space:]]*", "", xy)
+twitclean <-tm_map(twitclean,stripWhitespace)
+inspect(twitclean[1:10])
+twitclean <- tm_map(twitclean,remove.all)
+twitclean <- tm_map(twitclean, removePunctuation) #tanda baca
+twitclean <- tm_map(twitclean, tolower) #mengubah huruf kecil
+mystopwords <- readLines("stopwords-id.txt", warn = FALSE)
+twitclean <- tm_map(twitclean, removeWords, mystopwords)
+twitclean <- tm_map(twitclean , removeWords, c('babi','njir','anjrit','anj','taiikk','ngen','kntl','mmk','anjing','jancuk'))
+
+try.error = function(x){ #menghapus data kosong
+  #membuat nilai yang hilang / missing value
+  y = NA
+  try_error = tryCatch(tolower(x), error=function(e) e)
+  if (!inherits(try_error, "error")) #jika tidak ada eror
+    y = tolower(x)
+  return(y)
+}
+
+#huruf kecil menggunakan try.error dengan sapply 
+twitclean = sapply(twitclean, try.error)
+
+#menghilangkan NAS (Network Arrached Storage)
+twitclean = twitclean[!is.na(twitclean)]
+names(twitclean) = NULL
+
+#hasil data yang sudah bersih disimpan di 'Tweetbersih.csv'
+dataframe<-data.frame(text=unlist(sapply(twitclean, `[`)), stringsAsFactors=F)
+View(dataframe)
+write.csv(dataframe,'Tweetbersih.csv')
+```
+
+```{r}
+#skoring
+kalimat2<-read.csv("Tweetbersih.csv",header=TRUE)
+#skoring untuk pemberian skor atau nilai terhadap masing - masing value parameter untuk menentukan tingkat kemampuan dari masing-masing value
+kata.positif <- scan("positive.txt",what="character",comment.char=";")
+kata.negatif <- scan("negative.txt",what="character",comment.char=";")
+score.sentiment = function(kalimat2, kata.positif, kata.negatif,
+                           .progress='none'){
+  require(plyr)
+  require(stringr)
+  scores = laply(kalimat2, function(kalimat, kata.positif,
+                                    kata.negatif) {
+    kalimat = gsub('[[:punct:]]', '', kalimat)
+    kalimat = gsub('[[:cntrl:]]', '', kalimat)
+    kalimat = gsub('\\d+', '', kalimat)
+    kalimat = tolower(kalimat)
+    list.kata = str_split(kalimat, '\\s+')
+    kata2 = unlist(list.kata)
+    positif.matches = match(kata2, kata.positif)
+    negatif.matches = match(kata2, kata.negatif)
+    positif.matches = !is.na(positif.matches)
+    negatif.matches = !is.na(negatif.matches)
+    score = sum(positif.matches) - (sum(negatif.matches))
+    return(score)
+  }, kata.positif, kata.negatif, .progress=.progress )
+  scores.df = data.frame(score=scores, text=kalimat2)
+  return(scores.df)}
+
+hasil = score.sentiment(kalimat2$text, kata.positif, kata.negatif)
+#mengubah hasil dari nilai skor menjadi sentimen
+hasil$klasifikasi<- ifelse(hasil$score<0, "Negatif",ifelse(hasil$score==0,"Netral","Positif"))
+hasil$klasifikasi
+#menukar urutan baris sentimen
+data <- hasil[c(3,1,2)]
+write.csv(data, file = "datalabel.csv")
+dataLabel <- read.csv("datalabel.csv")
+dataLabel
+
+  #proses pengklasifikasian kata positif, negatif, dan netral
+  dataWC<- dataLabel
+  corpus = VCorpus(VectorSource(dataWC$text))
+  corpus = tm_map(corpus, content_transformer(tolower))
+  corpus = tm_map(corpus, removeNumbers)
+  corpus = tm_map(corpus, removePunctuation)
+  corpus = tm_map(corpus, removeWords, "stopwords-id.txt")
+  corpus = tm_map(corpus, stemDocument)
+  corpus = tm_map(corpus, stripWhitespace)
+  as.character(corpus[[1]])
+  corpus = VCorpus(VectorSource(data$text))
+    dtm = DocumentTermMatrix(corpus) 
+    dtm = removeSparseTerms(dtm, 0.999)
+    dtm
+  
+  #klasifikasi kata positif, negatif dan netral
+  positive= subset(dataWC,klasifikasi=="Positif") 
+  negative = subset(dataLabel, klasifikasi=="Negatif") 
+  neutral = subset(dataLabel, klasifikasi=="Netral") 
+
+#server
+#bagian yang akan menganalisa data kemudian diproses dan dioutputkan pada interface
+server <- function(input, output){
+  #output data cleaning
+  output$tbl = DT::renderDataTable({ 
+  DT::datatable(dataLabel, options = list(lengthChange = FALSE))# data akan ditampilkan dalam beberapa halaman.
+  })
+  
+  #output grafik sentimen analisis
+  output$barplot <- renderPlot({g20_dataset<-read.csv("Tweetbersih.csv",stringsAsFactors = FALSE)
+  review <-as.character(g20_dataset$text)
+  s<-get_nrc_sentiment(review)
+  review_combine<-cbind(g20_dataset$text,s)
+  par(mar=rep(3,4))
+  barplot(colSums(s),col=rainbow(10),ylab='count',main='Sentimen Analisis')
+  }, height=400)
+
+  #output wordcloud kata positif
+  output$WCP <- renderPlot({
+    wordcloud(positive$text, max.words = 100, colors = "blue")
+  })
+  #output wordcloud kata negatif
+  output$WCN <- renderPlot({
+    wordcloud(negative$text, max.words = 100, colors = "purple") 
+  })
+  #output wordcloud kata netral  
+  output$WC <- renderPlot({
+    wordcloud(neutral$text, max.words = 100, colors = "turquoise")
+  })
+  #output naivebayes
+  output$naivebayes <- renderPlot({
+    convert <- function(x) {
+    y <- ifelse(x > 0, 1,0)
+    y <- factor(y, levels=c(0,1), labels=c("No", "Yes"))
+    y
+      }  
+      datanaive = apply(dtm, 2, convert)
+      dataset = as.data.frame(as.matrix(datanaive))
+      dataset['class'] = data$klasifikasi
+      str(dataset$class)
+      
+      set.seed(31)
+      split = sample(2,nrow(dataset),prob = c(0.75,0.25),replace = TRUE)
+      train_set = dataset[split == 1,]
+      test_set = dataset[split == 2,] 
+      
+      prop.table(table(train_set$class))
+      prop.table(table(test_set$class))
+      control= trainControl(method="repeatedcv", number=10, repeats=2)
+      classifier_nb <- naiveBayes(train_set, train_set$class, laplace = 1,trControl = control,tuneLength = 7)
+      
+      classifier_nb
+      
+      test_set$class
+      train_set$class
+      
+      nb_pred = predict(classifier_nb, type = 'class', newdata =  test_set)
+      
+      test_ler <- as.factor(test_set$class) 
+      test_ler
+      nb_pred
+      confusionMatrix(nb_pred,test_ler)
+      
+      cm <- confusionMatrix(factor(nb_pred), factor(test_ler), dnn = c("Prediction", "Reference"))
+      
+      plt <- as.data.frame(cm$table)
+      plt$Prediction <- factor(plt$Prediction, levels=rev(levels(plt$Prediction)))
+      
+      ggplot(plt, aes(Prediction,Reference, fill= Freq)) +
+              geom_tile() + geom_text(aes(label=Freq)) +
+              scale_fill_gradient(low="white", high="#009194") +
+              labs(x = "Reference",y = "Prediction") +
+              scale_x_discrete(labels=c("Class_1","Class_2","Class_3","Class_4")) +
+              scale_y_discrete(labels=c("Class_4","Class_3","Class_2","Class_1"))
+  })
+}
+
+#interface  
+ui <- fluidPage(
+  titlePanel("Sentimen Analisis Pendapat Masyarakat Twitter Mengenai Periode Ketiga Jokowi"),
+  mainPanel(
+    tabsetPanel(type = "tabs",
+                tabPanel("Barplot", plotOutput("barplot")), #tab grafik
+                tabPanel("Data Twitter", DT::dataTableOutput('tbl')), #tab hasil data cleaning
+                tabPanel("Naive Bayes", plotOutput("naivebayes")), #tab naive bayes
+                tabPanel("WordCloud Negative", plotOutput("WCN")), #tab wordcloud kata negatif
+                tabPanel("WordCloud Positive", plotOutput("WCP")), #tab wordcloud kata positif
+                tabPanel("WordCloud Netral", plotOutput("WC")) #tab wordcloud kata netral
+    )
+  )
+)
+
+#pemanggilan shiny
+shinyApp(ui = ui, server = server, options = list(height = "1080px"))
+```
